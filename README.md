@@ -1,118 +1,168 @@
 # RetryLens AI SDK
 
-The official JavaScript/TypeScript SDK for **RetryLens AI**, a platform for monitoring and tracking application errors in real time.
+The official RetryLens AI SDK for capturing and reporting application exceptions to your RetryLens dashboard.
 
-RetryLens helps developers capture application exceptions and messages from their applications and send them to the RetryLens API for monitoring and debugging.
-
-## Features
-
-- Capture application exceptions.
-- Capture custom error messages.
-- Send error events to the RetryLens API.
-- Configure your API key, environment, and release.
-- Integrate with Node.js and TypeScript applications.
-
-## Requirements
-
-- Node.js
-- A RetryLens account and valid API key
-- A connected application or project in RetryLens
+Integrate RetryLens into a NestJS application using a dedicated `RetryLensExceptionFilter` or your existing global `AllExceptionsFilter`.
 
 ## Installation
 
-Install the SDK in your project:
-
 ```bash
-npm install @retrylensai/sdk
+npm install retrylensai-sdk
 ```
 
-## Configuration
+## 1. Configure environment variables
 
-Initialize RetryLens when your application starts:
-
-```typescript
-import { RetryLens } from '@retrylensai/sdk';
-
-RetryLens.init({
-  apiKey: process.env.RETRYLENS_API_KEY!,
-  baseUrl: process.env.RETRYLENS_BASE_URL!,
-  environment: process.env.NODE_ENV || 'development',
-  release: '1.0.0',
-});
-```
-
-Add the following environment variables to your `.env` file:
+Add these variables to your application's `.env` file:
 
 ```env
 RETRYLENS_API_KEY=your_retrylens_api_key
-RETRYLENS_BASE_URL=https://your-retrylens-api-url
+RETRYLENS_BASE_URL=https://retrylensai-api.onrender.com
 NODE_ENV=development
 ```
 
-Keep your API key private. Do not commit real credentials to version control.
+Keep your API key secret. Never expose it in frontend code or commit it to version control.
 
-## Capturing Errors
+## 2. Initialize RetryLens in `main.ts`
 
-Capture an exception:
+Initialize the SDK before starting your NestJS application so it is ready to capture exceptions.
 
 ```typescript
-try {
-  // Your application logic
-  throw new Error('Something went wrong');
-} catch (error) {
-  RetryLens.captureException(error);
+import { RetryLens } from 'retrylensai-sdk';
+import createServer, { CreateServerOptions } from '@/www';
+import { port, isProduction, allowedDomains } from '@/config';
+
+async function bootstrap() {
+  RetryLens.init({
+    apiKey: process.env.RETRYLENS_API_KEY!,
+    baseUrl: process.env.RETRYLENS_BASE_URL!,
+    environment: process.env.NODE_ENV || 'development',
+    release: '1.0.0',
+  });
+
+  const options: CreateServerOptions = {
+    port,
+    production: isProduction,
+    whitelistedDomains: allowedDomains,
+  };
+
+  await createServer(options);
+}
+
+bootstrap();
+```
+
+Ensure the required environment variables are configured before starting the application.
+
+## 3. Option A: Use the dedicated `RetryLensExceptionFilter`
+
+Create `src/common/filters/retrylens-exception.filter.ts`:
+
+```typescript
+import {
+  ArgumentsHost,
+  Catch,
+  ExceptionFilter,
+  HttpException,
+  HttpStatus,
+} from '@nestjs/common';
+import { RetryLens } from 'retrylensai-sdk';
+
+@Catch()
+export class RetryLensExceptionFilter implements ExceptionFilter {
+  async catch(exception: unknown, host: ArgumentsHost): Promise<void> {
+    const ctx = host.switchToHttp();
+    const response = ctx.getResponse();
+    const request = ctx.getRequest();
+
+    const status =
+      exception instanceof HttpException
+        ? exception.getStatus()
+        : HttpStatus.INTERNAL_SERVER_ERROR;
+
+    try {
+      await RetryLens.captureException(exception);
+    } catch (error) {
+      console.error('[RetryLens] Failed to capture exception:', error);
+    }
+
+    response.status(status).json({
+      statusCode: status,
+      message:
+        exception instanceof HttpException
+          ? exception.message
+          : 'Internal server error',
+      path: request.url,
+    });
+  }
 }
 ```
 
-Capture a custom message:
+Register the filter globally if your application does not already register another global exception filter:
 
 ```typescript
-RetryLens.captureMessage('Payment processing failed');
+app.useGlobalFilters(new RetryLensExceptionFilter());
 ```
 
-Captured events are sent to the configured RetryLens API. They will appear in your dashboard only if your API accepts the request and processes the event successfully.
+If your application creates the NestJS app inside a `createServer()` function, register this filter inside that function after creating the app.
 
-## NestJS Integration
+## 4. Option B: Integrate RetryLens into an existing `AllExceptionsFilter`
 
-Initialize the SDK in your NestJS application's `main.ts` before starting the server.
+If your application already has a global exception filter, you can integrate RetryLens into it instead of creating a second filter.
+
+Import the SDK:
 
 ```typescript
-import { RetryLens } from '@retrylensai/sdk';
-
-// Inside your bootstrap function, before app.listen()
-RetryLens.init({
-  apiKey: process.env.RETRYLENS_API_KEY!,
-  baseUrl: process.env.RETRYLENS_BASE_URL!,
-  environment: process.env.NODE_ENV || 'development',
-});
+import { RetryLens } from 'retrylensai-sdk';
 ```
 
-You can then call `RetryLens.captureException(error)` from your exception-handling logic.
+Inside your existing `catch()` method, add the capture logic before constructing the HTTP response:
 
-## Development
+```typescript
+const status =
+  exception instanceof HttpException
+    ? exception.getStatus()
+    : HttpStatus.INTERNAL_SERVER_ERROR;
 
-Clone the SDK repository and install its dependencies:
-
-```bash
-npm install
+try {
+  await RetryLens.captureException(exception);
+} catch (error) {
+  console.error('[RetryLens] Failed to capture exception:', error);
+}
 ```
 
-Build the package:
+Keep your existing response handling and custom validation logic unchanged.
 
-```bash
-npm run build
+For production applications, consider reporting unexpected exceptions and server errors (HTTP 5xx) rather than every expected client error. For example:
+
+```typescript
+if (
+  !(exception instanceof HttpException) ||
+  status >= 500
+) {
+  try {
+    await RetryLens.captureException(exception);
+  } catch (error) {
+    console.error('[RetryLens] Failed to capture exception:', error);
+  }
+}
 ```
 
-Run the development build in watch mode:
+## 5. Avoid registering both filters
 
-```bash
-npm run dev
-```
+Use either `RetryLensExceptionFilter` or your existing `AllExceptionsFilter` with RetryLens integration.
 
-## Contributing
+Registering both can cause the same exception to be captured twice or alter your application's existing error response format.
 
-Contributions, bug reports, and feature suggestions are welcome. Please open an issue or submit a pull request through the project repository.
+## 6. Verify incident capture
+
+1. Start your NestJS application.
+2. Trigger an exception that reaches the global exception filter.
+3. Check the application logs for SDK delivery failures.
+4. Confirm that the ingestion API accepts the event.
+5. Open your RetryLens dashboard and verify that the incident appears.
+
+A successful SDK call alone does not guarantee that an incident was saved. Confirm that the ingestion API returned a successful response.
 
 ## License
 
-Specify the license for this package here.
+ISC
